@@ -1602,6 +1602,9 @@ let sheetIdxToName2 = {};   // { idx: sheetName } para onclick handlers seguros
 // ─── FILTROS DE CONSOLIDACIÓN ─────────────────────────────────────
 let consolFilters2 = { year: 'all', mes: 'all', cuenta: 'all' };
 
+// ─── PIVOT TIPO POR HOJA ──────────────────────────────────────────
+let sheetPivotTipo2 = {}; // { idx: 'all' | 'Ingreso' | 'Egreso' }
+
 // ─── CONFIGURACIÓN DE HOJAS (Sistema de Mapeo Dinámico) ──────────
 // Para agregar nuevas hojas en el futuro, solo agrega una entrada aquí.
 const SHEET_PATTERNS = [
@@ -2608,6 +2611,9 @@ async function exportConsolidatedExcel() {
     totRow.eachCell(cell => Object.assign(cell.style, totalRowStyle));
     totRow.getCell('ing').numFmt = '$#,##0.00';
     totRow.getCell('egr').numFmt = '$#,##0.00';
+
+    // ── Tabla dinámica a la DERECHA (empieza en col 11 = K, col 10 = separador) ──
+    _addPivotToSheet(wsB, bRows, 10, C);
   }
 
   // ── HOJA: Resumen por institución ────────────────────────────────
@@ -2655,6 +2661,159 @@ async function exportConsolidatedExcel() {
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
+}
+
+/**
+ * Agrega una tabla dinámica (categoría × mes) a la derecha de la hoja activa.
+ * startCol: índice 1-based donde empieza el bloque de pivot.
+ */
+function _addPivotToSheet(ws, bRows, startCol, C) {
+  const months = [...new Set(bRows.map(r => r.mes).filter(m => m != null))].sort((a, b) => a - b);
+  if (!months.length) return;
+
+  // ── Acumular datos ──
+  const sections = {};
+  for (const r of bRows) {
+    const tipo = r.tipo_registro || 'Sin tipo';
+    const cat  = r.descripcion_corta || 'Sin categoría';
+    const m    = r.mes;
+    if (m == null) continue;
+    if (!sections[tipo])      sections[tipo]      = {};
+    if (!sections[tipo][cat]) sections[tipo][cat] = {};
+    sections[tipo][cat][m] = (sections[tipo][cat][m] || 0) + r.monto;
+  }
+
+  // ── Estilos ──
+  const pivotHeaderStyle = {
+    fill:      { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E293B' } },
+    font:      { bold: true, color: { argb: 'FFFFFFFF' }, name: 'Calibri', size: 10 },
+    alignment: { horizontal: 'center', vertical: 'middle' },
+    border:    { bottom: { style: 'thin', color: { argb: 'FF64748B' } } },
+  };
+  const sectionStyle = (tipo) => ({
+    fill: { type: 'pattern', pattern: 'solid',
+            fgColor: { argb: 'FF' + (tipo === 'Ingreso' ? 'D1FAE5' : 'FEE2E2') } },
+    font: { bold: true, name: 'Calibri', size: 10,
+            color: { argb: 'FF' + (tipo === 'Ingreso' ? '065F46' : '991B1B') } },
+  });
+  const subtotalStyle = (tipo) => ({
+    fill: { type: 'pattern', pattern: 'solid',
+            fgColor: { argb: 'FF' + (tipo === 'Ingreso' ? 'A7F3D0' : 'FECACA') } },
+    font: { bold: true, name: 'Calibri', size: 10,
+            color: { argb: 'FF' + (tipo === 'Ingreso' ? '065F46' : '991B1B') } },
+  });
+  const balStyle = {
+    fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2E8F0' } },
+    font: { bold: true, name: 'Calibri', size: 10, color: { argb: 'FF1E293B' } },
+  };
+
+  // Columna separadora
+  ws.getColumn(startCol).width = 3;
+
+  // Encabezados
+  let pivotRow = 1;
+  const hdrRow = ws.getRow(pivotRow);
+  hdrRow.getCell(startCol + 1).value = 'CATEGORÍA';
+  months.forEach((m, i) => {
+    const c = hdrRow.getCell(startCol + 2 + i);
+    c.value = MONTHS_LONG[m];
+    Object.assign(c.style, pivotHeaderStyle);
+    ws.getColumn(startCol + 2 + i).width = 14;
+  });
+  const totHdrCell = hdrRow.getCell(startCol + 2 + months.length);
+  totHdrCell.value = 'TOTAL';
+  Object.assign(totHdrCell.style, pivotHeaderStyle);
+  ws.getColumn(startCol + 2 + months.length).width = 16;
+  Object.assign(hdrRow.getCell(startCol + 1).style, pivotHeaderStyle);
+  ws.getColumn(startCol + 1).width = 30;
+  hdrRow.height = 18;
+  pivotRow++;
+
+  for (const tipo of ['Ingreso', 'Egreso']) {
+    if (!sections[tipo]) continue;
+    const ss   = sectionStyle(tipo);
+    const subs = subtotalStyle(tipo);
+
+    // Fila sección
+    const secRow = ws.getRow(pivotRow++);
+    const secLabel = tipo === 'Ingreso' ? '↑ INGRESOS' : '↓ EGRESOS';
+    for (let c = startCol + 1; c <= startCol + 1 + months.length + 1; c++) {
+      secRow.getCell(c).value = c === startCol + 1 ? secLabel : null;
+      Object.assign(secRow.getCell(c).style, ss);
+    }
+    secRow.height = 17;
+
+    // Categorías ordenadas por total
+    const catEntries = Object.entries(sections[tipo])
+      .map(([cat, bm]) => ({ cat, bm, total: Object.values(bm).reduce((s, v) => s + v, 0) }))
+      .sort((a, b) => b.total - a.total);
+
+    catEntries.forEach(({ cat, bm, total }) => {
+      const dr = ws.getRow(pivotRow++);
+      dr.getCell(startCol + 1).value = cat;
+      dr.getCell(startCol + 1).font  = { name: 'Calibri', size: 10 };
+      months.forEach((m, i) => {
+        const v = bm[m] || 0;
+        if (v) {
+          const cell = dr.getCell(startCol + 2 + i);
+          cell.value  = v;
+          cell.numFmt = '$#,##0.00';
+          cell.font   = { name: 'Calibri', size: 10 };
+        }
+      });
+      const tc = dr.getCell(startCol + 2 + months.length);
+      tc.value  = total;
+      tc.numFmt = '$#,##0.00';
+      tc.font   = { bold: true, name: 'Calibri', size: 10,
+                    color: { argb: 'FF' + (tipo === 'Ingreso' ? '065F46' : '991B1B') } };
+      dr.height = 15;
+    });
+
+    // Subtotal sección
+    const subR = ws.getRow(pivotRow++);
+    subR.getCell(startCol + 1).value = `Subtotal ${tipo === 'Ingreso' ? 'Ingresos' : 'Egresos'}`;
+    const subTotal = catEntries.reduce((s, e) => s + e.total, 0);
+    months.forEach((m, i) => {
+      const sv = catEntries.reduce((s, e) => s + (e.bm[m] || 0), 0);
+      const sc = subR.getCell(startCol + 2 + i);
+      sc.value = sv; sc.numFmt = '$#,##0.00';
+      Object.assign(sc.style, subs);
+    });
+    const stc = subR.getCell(startCol + 2 + months.length);
+    stc.value = subTotal; stc.numFmt = '$#,##0.00';
+    Object.assign(stc.style, subs);
+    subR.getCell(startCol + 1).style = subs;
+    subR.height = 17;
+  }
+
+  // Fila de balance neto (si existen ambos tipos)
+  if (sections['Ingreso'] && sections['Egreso']) {
+    const balR = ws.getRow(pivotRow++);
+    balR.getCell(startCol + 1).value = 'BALANCE NETO';
+    months.forEach((m, i) => {
+      const ing = Object.values(sections['Ingreso']).reduce((s, bm) => s + (bm[m] || 0), 0);
+      const egr = Object.values(sections['Egreso']).reduce((s, bm) => s + (bm[m] || 0), 0);
+      const bal = ing - egr;
+      const bc  = balR.getCell(startCol + 2 + i);
+      bc.value = bal; bc.numFmt = '$#,##0.00';
+      bc.font  = { bold: true, name: 'Calibri', size: 10,
+                   color: { argb: 'FF' + (bal >= 0 ? '065F46' : '991B1B') } };
+      bc.fill  = balStyle.fill;
+    });
+    const ingTotal = Object.values(sections['Ingreso']).flat()
+      .reduce((s, bm) => s + Object.values(bm).reduce((a, v) => a + v, 0), 0);
+    const egrTotal = Object.values(sections['Egreso']).flat()
+      .reduce((s, bm) => s + Object.values(bm).reduce((a, v) => a + v, 0), 0);
+    // Fix: recalculate with correct structure
+    const ingT = Object.entries(sections['Ingreso']).reduce((s, [, bm]) => s + Object.values(bm).reduce((a, v) => a + v, 0), 0);
+    const egrT = Object.entries(sections['Egreso']).reduce((s, [, bm]) => s + Object.values(bm).reduce((a, v) => a + v, 0), 0);
+    const totBc = balR.getCell(startCol + 2 + months.length);
+    totBc.value = ingT - egrT; totBc.numFmt = '$#,##0.00';
+    totBc.font  = { bold: true, name: 'Calibri', size: 11,
+                    color: { argb: 'FF' + (ingT - egrT >= 0 ? '065F46' : '991B1B') } };
+    balR.getCell(startCol + 1).style = balStyle;
+    balR.height = 18;
+  }
 }
 
 /** Fallback con SheetJS básico si ExcelJS no está disponible. */
@@ -3005,6 +3164,27 @@ function buildSheetDashboardHTML(sheetName, idx) {
 
       <!-- Paneles de filtro por columna (position:fixed via JS) -->
       ${colPanels}
+    </div>
+
+    <!-- ── Tabla Dinámica: Categoría × Mes ──────────────────────── -->
+    <div class="table-card pivot-card">
+      <div class="tbl-top-bar">
+        <div class="pivot-title-wrap">
+          <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+          <span class="tbl-quick-label">Tabla Dinámica — Categoría × Mes</span>
+        </div>
+        <div class="tbl-quick-row">
+          <button class="sfb-quick sfb-active" id="pvt-all-${idx}"
+            onclick="setPivotTipo(${idx},'all',this)">Ambos</button>
+          <button class="sfb-quick sfb-income" id="pvt-ing-${idx}"
+            onclick="setPivotTipo(${idx},'Ingreso',this)">↑ Ingresos</button>
+          <button class="sfb-quick sfb-expense" id="pvt-egr-${idx}"
+            onclick="setPivotTipo(${idx},'Egreso',this)">↓ Egresos</button>
+        </div>
+      </div>
+      <div class="table-wrapper pivot-wrapper" id="sheet-pivot-${idx}">
+        <p class="tx-empty">Cargando tabla dinámica…</p>
+      </div>
     </div>`;
 }
 
@@ -3156,6 +3336,7 @@ function applySheetFilters2(sheetName, idx) {
 
   renderSheetKPIs2(sheetName, idx, rows);
   renderSheetTableBody2(sheetName, idx, rows);
+  renderSheetPivot2(sheetName, idx, rows);
   updateSortIcons2(idx, f);
   updateContextBar2(idx, f);
   updateColFilterIndicators2(idx, f);
@@ -3281,6 +3462,179 @@ function renderSheetTableBody2(sheetName, idx, rows) {
         <span class="totals-bal" style="color:${balColor}">${formatMoney(balance)}</span>
       </div>`;
   }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// TABLA DINÁMICA POR CATEGORÍA Y MES
+// ══════════════════════════════════════════════════════════════════
+
+/**
+ * Construye y renderiza la tabla dinámica (categoría × mes) para una hoja.
+ * rows = filas ya filtradas por los filtros globales.
+ */
+function renderSheetPivot2(sheetName, idx, rows) {
+  const container = document.getElementById(`sheet-pivot-${idx}`);
+  if (!container) return;
+
+  const pivotTipo = sheetPivotTipo2[idx] || 'all';
+  let pivotRows   = pivotTipo !== 'all' ? rows.filter(r => r.tipo_registro === pivotTipo) : rows;
+
+  if (!pivotRows.length) {
+    container.innerHTML = '<p class="tx-empty">Sin datos para la selección actual</p>';
+    return;
+  }
+
+  // Meses activos (ordenados)
+  const monthSet = new Set(pivotRows.map(r => r.mes).filter(m => m != null));
+  const months   = [...monthSet].sort((a, b) => a - b);
+
+  if (!months.length) {
+    container.innerHTML = '<p class="tx-empty">Sin datos de mes detectados</p>';
+    return;
+  }
+
+  // Acumular: tipo → categoría → mes → monto
+  const sections = {};
+  for (const r of pivotRows) {
+    const tipo = r.tipo_registro || 'Sin tipo';
+    const cat  = r.descripcion_corta || 'Sin categoría';
+    const m    = r.mes;
+    if (m == null) continue;
+    if (!sections[tipo])       sections[tipo]       = {};
+    if (!sections[tipo][cat])  sections[tipo][cat]  = {};
+    sections[tipo][cat][m] = (sections[tipo][cat][m] || 0) + r.monto;
+  }
+
+  const tipos = ['Ingreso', 'Egreso'].filter(t => sections[t]);
+
+  // ── Encabezado de tabla ──
+  const mHeaders = months.map(m =>
+    `<th class="text-right pivot-month-hdr">${MONTHS_ES[m]}</th>`
+  ).join('');
+
+  let html = `
+    <table class="data-table pivot-table">
+      <thead>
+        <tr>
+          <th class="pivot-cat-hdr">Categoría</th>
+          ${mHeaders}
+          <th class="text-right pivot-total-hdr">Total</th>
+        </tr>
+      </thead>
+      <tbody>`;
+
+  for (const tipo of tipos) {
+    const tipoColor = tipo === 'Ingreso' ? 'var(--income)' : 'var(--expense)';
+    const tipoLabel = tipo === 'Ingreso' ? '↑ INGRESOS' : '↓ EGRESOS';
+    const tipoBg    = tipo === 'Ingreso' ? 'rgba(16,185,129,0.07)' : 'rgba(244,63,94,0.07)';
+
+    html += `<tr class="pivot-section-row" style="background:${tipoBg}">
+      <td colspan="${months.length + 2}" class="pivot-section-hdr" style="color:${tipoColor}">
+        ${tipoLabel}
+      </td>
+    </tr>`;
+
+    // Categorías ordenadas por total desc
+    const catEntries = Object.entries(sections[tipo])
+      .map(([cat, byMonth]) => ({
+        cat,
+        byMonth,
+        total: Object.values(byMonth).reduce((s, v) => s + v, 0),
+      }))
+      .sort((a, b) => b.total - a.total);
+
+    const MAX_CATS = 80;
+    catEntries.slice(0, MAX_CATS).forEach(({ cat, byMonth, total }) => {
+      const cells = months.map(m => {
+        const v = byMonth[m] || 0;
+        return `<td class="text-right pivot-amount${v ? '' : ' pivot-zero'}">${
+          v ? formatMoney(v) : '<span class="pivot-dash">—</span>'
+        }</td>`;
+      }).join('');
+      html += `<tr>
+        <td class="pivot-cat-cell">${escHtml(cat)}</td>
+        ${cells}
+        <td class="text-right pivot-total-col" style="color:${tipoColor}">
+          <strong>${formatMoney(total)}</strong>
+        </td>
+      </tr>`;
+    });
+
+    if (catEntries.length > MAX_CATS) {
+      html += `<tr><td colspan="${months.length + 2}" class="tx-truncate-note">
+        + ${catEntries.length - MAX_CATS} categorías más (aplica filtros para ver todas)
+      </td></tr>`;
+    }
+
+    // Subtotal de la sección
+    const subByMonth = {};
+    months.forEach(m => {
+      subByMonth[m] = catEntries.reduce((s, e) => s + (e.byMonth[m] || 0), 0);
+    });
+    const subTotal = catEntries.reduce((s, e) => s + e.total, 0);
+    const subCells = months.map(m =>
+      `<td class="text-right pivot-sub-col" style="color:${tipoColor}">
+         <strong>${formatMoney(subByMonth[m])}</strong>
+       </td>`
+    ).join('');
+
+    html += `<tr class="pivot-subtotal-row">
+      <td class="pivot-cat-cell">
+        <strong>Subtotal ${tipo === 'Ingreso' ? 'Ingresos' : 'Egresos'}</strong>
+      </td>
+      ${subCells}
+      <td class="text-right pivot-total-col" style="color:${tipoColor}">
+        <strong>${formatMoney(subTotal)}</strong>
+      </td>
+    </tr>`;
+  }
+
+  // ── Fila de Balance Neto (solo si se muestran ambos) ──
+  if (tipos.length === 2) {
+    const ingTotals = months.map(m =>
+      Object.values(sections['Ingreso']).reduce((s, bm) => s + (bm[m] || 0), 0)
+    );
+    const egrTotals = months.map(m =>
+      Object.values(sections['Egreso']).reduce((s, bm) => s + (bm[m] || 0), 0)
+    );
+    const balTotals = months.map((_, i) => ingTotals[i] - egrTotals[i]);
+    const totalBal  = balTotals.reduce((s, v) => s + v, 0);
+    const balCells  = balTotals.map(v => {
+      const c = v >= 0 ? 'var(--income)' : 'var(--expense)';
+      return `<td class="text-right pivot-balance-col" style="color:${c}"><strong>${formatMoney(v)}</strong></td>`;
+    }).join('');
+    const balC = totalBal >= 0 ? 'var(--income)' : 'var(--expense)';
+
+    html += `<tr class="pivot-balance-row">
+      <td class="pivot-cat-cell"><strong>BALANCE NETO</strong></td>
+      ${balCells}
+      <td class="text-right pivot-total-col" style="color:${balC}">
+        <strong>${formatMoney(totalBal)}</strong>
+      </td>
+    </tr>`;
+  }
+
+  html += `</tbody></table>`;
+  container.innerHTML = html;
+}
+
+/** Cambia el tipo de pivot (all / Ingreso / Egreso) y re-renderiza. */
+function setPivotTipo(idx, tipo, btn) {
+  sheetPivotTipo2[idx] = tipo;
+  ['all','ing','egr'].forEach(k => {
+    const b = document.getElementById(`pvt-${k}-${idx}`);
+    if (b) b.classList.remove('sfb-active');
+  });
+  if (btn) btn.classList.add('sfb-active');
+  const name = sheetIdxToName2[idx];
+  if (!name) return;
+  const f    = getSheetFilter2(name);
+  let rows   = processedData2[name] || [];
+  // Aplicar filtros globales igual que applySheetFilters2 (sin re-renderizar tabla)
+  if (f.year   !== 'all') rows = rows.filter(r => String(r.year) === String(f.year));
+  if (f.mes    !== 'all') rows = rows.filter(r => String(r.mes)  === String(f.mes));
+  if (f.cuenta !== 'all') rows = rows.filter(r => r.cuenta === f.cuenta);
+  renderSheetPivot2(name, idx, rows);
 }
 
 // ─── Handlers de filtros ──────────────────────────────────────────
