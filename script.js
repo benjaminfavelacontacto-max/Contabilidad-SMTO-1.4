@@ -2501,7 +2501,25 @@ async function exportConsolidatedExcel() {
   wb.creator = 'FinDash · SMTO';
   wb.created = new Date();
 
-  const bancos = [...new Set(finalDataset2.map(r => r.banco))].sort();
+  // ── Aplicar filtros activos de la UI al dataset de exportación ────
+  let exportRows = finalDataset2;
+  if (consolFilters2.year !== 'all') {
+    exportRows = exportRows.filter(r => {
+      const y = r.fecha ? r.fecha.getFullYear() : null;
+      return String(y) === String(consolFilters2.year);
+    });
+  }
+  if (consolFilters2.mes !== 'all') {
+    exportRows = exportRows.filter(r => {
+      const m = r.fecha ? r.fecha.getMonth() : null;
+      return String(m) === String(consolFilters2.mes);
+    });
+  }
+  if (consolFilters2.cuenta !== 'all') {
+    exportRows = exportRows.filter(r => r.cuenta === consolFilters2.cuenta || r.banco === consolFilters2.cuenta);
+  }
+
+  const bancos = [...new Set(exportRows.map(r => r.banco))].sort();
 
   // ── HOJA: Concentrado ─────────────────────────────────────────────
   const wsConc = wb.addWorksheet('Concentrado');
@@ -2521,7 +2539,7 @@ async function exportConsolidatedExcel() {
   applyAutoFilter(wsConc, 10);
   freezeTopRow(wsConc);
 
-  finalDataset2.forEach((r, ri) => {
+  exportRows.forEach((r, ri) => {
     const isAlt  = ri % 2 === 0;
     const tipo   = r.tipo_registro;
     const anio   = r.fecha ? r.fecha.getFullYear() : null;
@@ -2554,7 +2572,7 @@ async function exportConsolidatedExcel() {
 
   // ── HOJAS POR BANCO ───────────────────────────────────────────────
   for (const banco of bancos) {
-    const bRows = finalDataset2.filter(r => r.banco === banco);
+    const bRows = exportRows.filter(r => r.banco === banco);
     const wsB   = wb.addWorksheet(banco.substring(0, 31));
     wsB.columns = [
       { header: 'Fecha',       key: 'fecha',  width: 13 },
@@ -2631,7 +2649,7 @@ async function exportConsolidatedExcel() {
 
   let sumRI = 0, sumRE = 0;
   bancos.forEach((banco, bi) => {
-    const bRows = finalDataset2.filter(r => r.banco === banco);
+    const bRows = exportRows.filter(r => r.banco === banco);
     const i     = bRows.filter(r => r.tipo_registro === 'Ingreso').reduce((s, r) => s + r.monto, 0);
     const e     = bRows.filter(r => r.tipo_registro === 'Egreso').reduce((s, r) => s + r.monto, 0);
     sumRI += i; sumRE += e;
@@ -2645,19 +2663,24 @@ async function exportConsolidatedExcel() {
     });
     row.height = 17;
   });
-  const totRes = wsRes.addRow({ banco: 'TOTAL GENERAL', ing: sumRI, egr: sumRE, bal: sumRI - sumRE, movs: finalDataset2.length });
+  const totRes = wsRes.addRow({ banco: 'TOTAL GENERAL', ing: sumRI, egr: sumRE, bal: sumRI - sumRE, movs: exportRows.length });
   totRes.height = 20;
   totRes.eachCell(cell => Object.assign(cell.style, totalRowStyle));
   ['ing','egr','bal'].forEach(k => { totRes.getCell(k).numFmt = '$#,##0.00'; });
 
   // ── Descargar ────────────────────────────────────────────────────
   const fecha   = new Date().toISOString().slice(0, 10);
+  const fileSuffix = [
+    consolFilters2.year !== 'all' ? consolFilters2.year : '',
+    consolFilters2.mes  !== 'all' ? MONTHS_LONG[+consolFilters2.mes] || consolFilters2.mes : '',
+    consolFilters2.cuenta !== 'all' ? consolFilters2.cuenta.replace(/[^a-zA-Z0-9]/g, '_') : '',
+  ].filter(Boolean).join('_');
   const buffer  = await wb.xlsx.writeBuffer();
   const blob    = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   const url     = URL.createObjectURL(blob);
   const a       = document.createElement('a');
   a.href        = url;
-  a.download    = `Concentrado_SMTO_${fecha}.xlsx`;
+  a.download    = `Concentrado_SMTO${fileSuffix ? '_' + fileSuffix : ''}_${fecha}.xlsx`;
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 500);
